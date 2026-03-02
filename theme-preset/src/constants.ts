@@ -8,3 +8,5 @@ export const FEEDBACK_TIMEOUT = 1500; // Success feedback display duration (ms)
 export const FOCUS_DELAY = 100; // Input focus delay (ms)
 
 export const PLUGIN_NAME = 'themepreset';
+
+export const SHARED_CSS_SEPARATOR = '/* ===== SHARED CSS END / THEME CSS START ===== */';

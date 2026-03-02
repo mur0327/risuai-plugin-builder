@@ -3,7 +3,7 @@
  * API v3.0 - Uses async Risuai API
  */
 
-import { FEEDBACK_TIMEOUT, FOCUS_DELAY } from './constants';
+import { FEEDBACK_TIMEOUT, FOCUS_DELAY, SHARED_CSS_SEPARATOR } from './constants';
 import {
     getPresets,
     savePresets,
@@ -20,7 +20,10 @@ import {
     removeCharacterThemeMapping,
     getDefaultTheme,
     setDefaultTheme,
-    listThemePresets
+    listThemePresets,
+    getSharedCSS,
+    saveSharedCSS,
+    combineCSS
 } from './storage';
 import { getAutoSwitchEnabled, setAutoSwitchEnabled, startAutoSwitch, stopAutoSwitch } from './auto-switch';
 import { getShortcut, setShortcut, formatShortcutDisplay } from './shortcuts';
@@ -34,12 +37,46 @@ const windowState: WindowState = {
     dragOffset: { x: 0, y: 0 }
 };
 
-// Permission state - tracks if permissions have been granted this session
-// Once granted, we don't need to hide iframe for permission dialogs
-const permissionState = {
-    database: false,      // getDatabase() permission
-    mainDocument: false   // getRootDocument() permission
+// Tracks which permissions have been confirmed this session,
+// so we only hide the iframe for the first permission dialog.
+const grantedPermissions = new Set<string>();
+const deniedPermissions = new Set<string>();
+
+const PERMISSION_LABELS: Record<string, string> = {
+    db: 'Database access',
+    mainDom: 'Main document access',
 };
+
+/**
+ * Request a plugin permission, hiding the iframe only on first request
+ * so the RisuAI permission dialog is not covered by the plugin container.
+ * Once granted, subsequent calls skip the hide/show cycle entirely.
+ * If denied, shows an error modal (RisuAI caches denial for the session).
+ */
+async function requestPermission(permission: string): Promise<boolean> {
+    if (grantedPermissions.has(permission)) return true;
+
+    if (deniedPermissions.has(permission)) {
+        showModal({
+            title: '⚠️ Permission Required',
+            content: `"${PERMISSION_LABELS[permission] || permission}" permission was denied.<br>Please refresh the app to request it again.`,
+            buttons: [{ text: 'OK', primary: true }]
+        });
+        return false;
+    }
+
+    // First time requesting - hide iframe so RisuAI's dialog is visible
+    await Risuai.hideContainer();
+    const granted = await Risuai.requestPluginPermission(permission);
+    await Risuai.showContainer('fullscreen');
+
+    if (granted) {
+        grantedPermissions.add(permission);
+    } else {
+        deniedPermissions.add(permission);
+    }
+    return granted;
+}
 
 /**
  * Show a modal dialog
@@ -204,6 +241,51 @@ export function createFloatingWindow(): HTMLElement {
                     width: 100% !important;
                     justify-content: center !important;
                 }
+
+                #theme-preset-floating-window {
+                    width: 95vw !important;
+                    max-height: 90vh !important;
+                }
+            }
+
+            /* Tab button styles */
+            .tab-btn {
+                padding: 10px 16px;
+                border: none;
+                background: transparent;
+                color: var(--risu-theme-textcolor2, #888);
+                cursor: pointer;
+                font-size: 0.9em;
+                font-weight: 500;
+                border-bottom: 2px solid transparent;
+                transition: all 0.2s;
+            }
+            .tab-btn:hover {
+                color: var(--risu-theme-textcolor, #fff);
+            }
+            .tab-btn.active {
+                color: var(--risu-theme-textcolor, #fff);
+                border-bottom-color: var(--risu-theme-selected, #4a9eff);
+            }
+
+            /* Editor textarea styles */
+            .css-editor-textarea {
+                width: 100%;
+                min-height: 300px;
+                padding: 12px;
+                border-radius: 6px;
+                border: 1px solid var(--risu-theme-darkborderc, #333);
+                background: var(--risu-theme-bgcolor, #2a2a2a);
+                color: var(--risu-theme-textcolor, #fff);
+                font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+                font-size: 12px;
+                line-height: 1.5;
+                resize: vertical;
+                box-sizing: border-box;
+            }
+            .css-editor-textarea:focus {
+                outline: none;
+                border-color: var(--risu-theme-selected, #4a9eff);
             }
         `;
         document.head.appendChild(style);
@@ -233,9 +315,9 @@ export function createFloatingWindow(): HTMLElement {
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 500px;
+        width: 600px;
         max-width: 90vw;
-        max-height: 80vh;
+        max-height: 85vh;
         background: var(--risu-theme-darkbg, #1a1a1a);
         border: 2px solid var(--risu-theme-darkborderc, #333);
         border-radius: 12px;
@@ -246,7 +328,6 @@ export function createFloatingWindow(): HTMLElement {
         font-family: system-ui, -apple-system, sans-serif;
     `;
 
-    // Simplified UI structure
     container.innerHTML = `
         <div id="preset-window-header" style="
             padding: 15px 20px;
@@ -282,89 +363,196 @@ export function createFloatingWindow(): HTMLElement {
             </button>
         </div>
 
+        <!-- Tab Navigation -->
+        <div style="display: flex; border-bottom: 1px solid var(--risu-theme-darkborderc, #333); background: var(--risu-theme-bgcolor, #2a2a2a);">
+            <button class="tab-btn active" data-tab="presets">📦 프리셋</button>
+            <button class="tab-btn" data-tab="editor">✏️ CSS/HTML 에디터</button>
+            <button class="tab-btn" data-tab="autoswitch">⚡ 자동 전환</button>
+        </div>
+
         <div style="padding: 20px; overflow-y: auto; flex: 1;">
-            <!-- Save Preset Section -->
-            <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-                <input type="text" id="preset-name-input" placeholder="Enter preset name..."
-                       style="flex: 1; min-width: 150px; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--risu-theme-darkborderc, #333); background: var(--risu-theme-bgcolor, #2a2a2a); color: var(--risu-theme-textcolor, #fff); font-size: 0.95em;">
-                <button id="save-preset-btn" style="
-                    padding: 10px 16px;
-                    border-radius: 6px;
-                    border: none;
-                    background: var(--risu-theme-selected, #4a9eff);
-                    color: var(--risu-theme-textcolor, #fff);
-                    cursor: pointer;
-                    font-weight: 600;
-                    font-size: 0.95em;
-                    transition: all 0.2s;
+            <!-- Presets Tab -->
+            <div id="tab-presets" class="tab-content">
+                <!-- Save Preset Section -->
+                <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+                    <input type="text" id="preset-name-input" placeholder="Enter preset name..."
+                           style="flex: 1; min-width: 150px; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--risu-theme-darkborderc, #333); background: var(--risu-theme-bgcolor, #2a2a2a); color: var(--risu-theme-textcolor, #fff); font-size: 0.95em;">
+                    <button id="save-preset-btn" style="
+                        padding: 10px 16px;
+                        border-radius: 6px;
+                        border: none;
+                        background: var(--risu-theme-selected, #4a9eff);
+                        color: var(--risu-theme-textcolor, #fff);
+                        cursor: pointer;
+                        font-weight: 600;
+                        font-size: 0.95em;
+                        transition: all 0.2s;
+                    ">
+                        💾 Save Current
+                    </button>
+                </div>
+
+                <!-- Import/Export Section -->
+                <div style="
+                    border-top: 1px solid var(--risu-theme-darkborderc, #333);
+                    border-bottom: 1px solid var(--risu-theme-darkborderc, #333);
+                    padding: 12px 0;
+                    margin-bottom: 20px;
                 ">
-                    💾 Save Current
-                </button>
-            </div>
-
-            <!-- Import/Export Section -->
-            <div style="
-                border-top: 1px solid var(--risu-theme-darkborderc, #333);
-                border-bottom: 1px solid var(--risu-theme-darkborderc, #333);
-                padding: 12px 0;
-                margin-bottom: 20px;
-            ">
-                <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin-bottom: 8px; text-align: center;">Import/Export</div>
-                <div style="display: grid; grid-template-columns: 1fr; gap: 10px;">
-                    <button id="import-preset-file-btn" style="
-                        padding: 10px 16px;
-                        border-radius: 6px;
-                        border: 1px solid var(--risu-theme-darkborderc, #333);
-                        background: var(--risu-theme-darkbutton, #333);
-                        color: var(--risu-theme-textcolor, #fff);
-                        cursor: pointer;
-                        font-weight: 500;
-                        font-size: 0.9em;
-                        transition: all 0.2s;
-                    " title="Import a single theme preset file">
-                        📂 Import Theme File
-                    </button>
+                    <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin-bottom: 8px; text-align: center;">Import/Export</div>
+                    <div style="display: grid; grid-template-columns: 1fr; gap: 10px;">
+                        <button id="import-preset-file-btn" style="
+                            padding: 10px 16px;
+                            border-radius: 6px;
+                            border: 1px solid var(--risu-theme-darkborderc, #333);
+                            background: var(--risu-theme-darkbutton, #333);
+                            color: var(--risu-theme-textcolor, #fff);
+                            cursor: pointer;
+                            font-weight: 500;
+                            font-size: 0.9em;
+                            transition: all 0.2s;
+                        " title="Import a single theme preset file">
+                            📂 Import Theme File
+                        </button>
+                    </div>
+                    <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin: 12px 0 8px 0; text-align: center;">Complete Backup</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <button id="export-all-btn" style="
+                            padding: 10px 16px;
+                            border-radius: 6px;
+                            border: 1px solid var(--risu-theme-darkborderc, #333);
+                            background: var(--risu-theme-darkbutton, #333);
+                            color: var(--risu-theme-textcolor, #fff);
+                            cursor: pointer;
+                            font-weight: 500;
+                            font-size: 0.9em;
+                            transition: all 0.2s;
+                        " title="Export all themes + character mappings">
+                            📦 Export Backup
+                        </button>
+                        <button id="import-all-btn" style="
+                            padding: 10px 16px;
+                            border-radius: 6px;
+                            border: 1px solid var(--risu-theme-darkborderc, #333);
+                            background: var(--risu-theme-darkbutton, #333);
+                            color: var(--risu-theme-textcolor, #fff);
+                            cursor: pointer;
+                            font-weight: 500;
+                            font-size: 0.9em;
+                            transition: all 0.2s;
+                        " title="Import all themes + character mappings">
+                            📥 Import Backup
+                        </button>
+                    </div>
                 </div>
-                <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin: 12px 0 8px 0; text-align: center;">Complete Backup</div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    <button id="export-all-btn" style="
-                        padding: 10px 16px;
-                        border-radius: 6px;
-                        border: 1px solid var(--risu-theme-darkborderc, #333);
-                        background: var(--risu-theme-darkbutton, #333);
-                        color: var(--risu-theme-textcolor, #fff);
-                        cursor: pointer;
-                        font-weight: 500;
-                        font-size: 0.9em;
-                        transition: all 0.2s;
-                    " title="Export all themes + character mappings">
-                        📦 Export Backup
-                    </button>
-                    <button id="import-all-btn" style="
-                        padding: 10px 16px;
-                        border-radius: 6px;
-                        border: 1px solid var(--risu-theme-darkborderc, #333);
-                        background: var(--risu-theme-darkbutton, #333);
-                        color: var(--risu-theme-textcolor, #fff);
-                        cursor: pointer;
-                        font-weight: 500;
-                        font-size: 0.9em;
-                        transition: all 0.2s;
-                    " title="Import all themes + character mappings">
-                        📥 Import Backup
-                    </button>
+
+                <h4 style="color: var(--risu-theme-textcolor, #fff); margin: 20px 0 10px 0;">Saved Presets</h4>
+                <div id="preset-list" style="display: flex; flex-direction: column; gap: 8px;">
+                    <!-- Preset items will be added here dynamically -->
                 </div>
             </div>
 
-            <h4 style="color: var(--risu-theme-textcolor, #fff); margin: 20px 0 10px 0;">Saved Presets</h4>
-            <div id="preset-list" style="display: flex; flex-direction: column; gap: 8px;">
-                <!-- Preset items will be added here dynamically -->
+            <!-- Editor Tab -->
+            <div id="tab-editor" class="tab-content" style="display: none;">
+                <!-- Custom HTML Section -->
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h4 style="color: var(--risu-theme-textcolor, #fff); margin: 0;">🖼️ 커스텀 HTML</h4>
+                        <div style="display: flex; gap: 8px;">
+                            <button id="refresh-current-html-btn" style="
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                border: 1px solid var(--risu-theme-darkborderc, #333);
+                                background: var(--risu-theme-darkbutton, #333);
+                                color: var(--risu-theme-textcolor, #fff);
+                                cursor: pointer;
+                                font-size: 0.8em;
+                            ">새로고침</button>
+                            <button id="apply-current-html-btn" style="
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                border: none;
+                                background: var(--risu-theme-selected, #4a9eff);
+                                color: var(--risu-theme-textcolor, #fff);
+                                cursor: pointer;
+                                font-size: 0.8em;
+                                font-weight: 600;
+                            ">적용</button>
+                        </div>
+                    </div>
+                    <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin-bottom: 8px;">
+                        현재 적용된 커스텀 HTML (GUI HTML)입니다.
+                    </div>
+                    <textarea id="current-html-editor" class="css-editor-textarea" style="min-height: 180px;" placeholder="커스텀 HTML..."></textarea>
+                </div>
+
+                <!-- Shared CSS Section -->
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h4 style="color: var(--risu-theme-textcolor, #fff); margin: 0;">🔧 공용 CSS</h4>
+                        <div style="display: flex; gap: 8px;">
+                            <button id="load-shared-css-btn" style="
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                border: 1px solid var(--risu-theme-darkborderc, #333);
+                                background: var(--risu-theme-darkbutton, #333);
+                                color: var(--risu-theme-textcolor, #fff);
+                                cursor: pointer;
+                                font-size: 0.8em;
+                            ">불러오기</button>
+                            <button id="save-shared-css-btn" style="
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                border: none;
+                                background: var(--risu-theme-selected, #4a9eff);
+                                color: var(--risu-theme-textcolor, #fff);
+                                cursor: pointer;
+                                font-size: 0.8em;
+                                font-weight: 600;
+                            ">저장</button>
+                        </div>
+                    </div>
+                    <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin-bottom: 8px;">
+                        모든 테마에서 공통으로 사용될 CSS입니다. 테마 로드 시 유지됩니다.
+                    </div>
+                    <textarea id="shared-css-editor" class="css-editor-textarea" style="min-height: 200px;" placeholder="공용 CSS를 입력하세요..."></textarea>
+                </div>
+
+                <!-- Current Theme CSS Section -->
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h4 style="color: var(--risu-theme-textcolor, #fff); margin: 0;">🎨 현재 테마 CSS</h4>
+                        <div style="display: flex; gap: 8px;">
+                            <button id="refresh-current-css-btn" style="
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                border: 1px solid var(--risu-theme-darkborderc, #333);
+                                background: var(--risu-theme-darkbutton, #333);
+                                color: var(--risu-theme-textcolor, #fff);
+                                cursor: pointer;
+                                font-size: 0.8em;
+                            ">새로고침</button>
+                            <button id="apply-current-css-btn" style="
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                border: none;
+                                background: var(--risu-theme-selected, #4a9eff);
+                                color: var(--risu-theme-textcolor, #fff);
+                                cursor: pointer;
+                                font-size: 0.8em;
+                                font-weight: 600;
+                            ">적용</button>
+                        </div>
+                    </div>
+                    <div style="color: var(--risu-theme-textcolor2, #888); font-size: 0.8em; margin-bottom: 8px;">
+                        현재 테마의 CSS입니다. '적용' 버튼을 누르면 공용 CSS와 함께 저장됩니다.
+                    </div>
+                    <textarea id="current-css-editor" class="css-editor-textarea" style="min-height: 250px;" placeholder="테마 CSS..."></textarea>
+                </div>
             </div>
 
-            <!-- Character Auto-Switch Section -->
-            <div style="margin-top: 30px; padding-top: 20px; border-top: 2px solid var(--risu-theme-darkborderc, #333);">
-                <h4 style="color: var(--risu-theme-textcolor, #fff); margin: 0 0 15px 0;">⚡ Character Auto-Switch</h4>
-
+            <!-- Auto-Switch Tab -->
+            <div id="tab-autoswitch" class="tab-content" style="display: none;">
                 <div style="margin-bottom: 15px;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--risu-theme-textcolor, #fff);">
                         <input type="checkbox" id="auto-switch-toggle" style="cursor: pointer;">
@@ -507,6 +695,42 @@ function setupEventListeners(): void {
         toggleFloatingWindow();
     });
 
+    // Tab switching
+    const tabBtns = container.querySelectorAll('.tab-btn');
+    tabBtns.forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const tabName = (btn as HTMLElement).dataset.tab;
+            if (!tabName) return;
+
+            // Update active tab button
+            tabBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            // Show/hide tab content
+            container.querySelectorAll('.tab-content').forEach(content => {
+                (content as HTMLElement).style.display = 'none';
+            });
+            const targetTab = container.querySelector(`#tab-${tabName}`);
+            if (targetTab) {
+                (targetTab as HTMLElement).style.display = 'block';
+            }
+
+            windowState.currentTab = tabName;
+
+            // Load editor data when switching to editor tab
+            if (tabName === 'editor') {
+                await loadEditorData();
+            }
+            // Update auto-switch UI when switching to autoswitch tab
+            if (tabName === 'autoswitch') {
+                await updateAutoSwitchUI();
+            }
+        });
+    });
+
+    // Editor tab event handlers
+    setupEditorEventListeners();
+
     // Save preset
     const saveBtn = container.querySelector('#save-preset-btn');
     const nameInput = container.querySelector('#preset-name-input') as HTMLInputElement;
@@ -522,15 +746,9 @@ function setupEventListeners(): void {
             return;
         }
 
-        // Hide iframe only if DB permission not yet granted (so dialog shows on top)
-        if (!permissionState.database) {
-            await Risuai.hideContainer();
-            await saveCurrentTheme(name);
-            permissionState.database = true;
-            await Risuai.showContainer('fullscreen');
-        } else {
-            await saveCurrentTheme(name);
-        }
+        // Request DB permission lazily - only when actually saving
+        if (!await requestPermission('db')) return;
+        await saveCurrentTheme(name);
 
         nameInput.value = '';
         await updatePresetList();
@@ -601,6 +819,7 @@ function setupEventListeners(): void {
         const characterThemeMap = await getCharacterThemeMap();
         const defaultTheme = await getDefaultTheme();
         const autoSwitch = await getAutoSwitchEnabled();
+        const sharedCSS = await getSharedCSS();
 
         if (presets.length === 0 && Object.keys(characterThemeMap).length === 0) {
             showModal({
@@ -620,7 +839,8 @@ function setupEventListeners(): void {
             themePresets: presets,
             characterThemeMap: characterThemeMap,
             defaultTheme: defaultTheme,
-            autoSwitchEnabled: autoSwitch
+            autoSwitchEnabled: autoSwitch,
+            sharedCSS: sharedCSS
         };
 
         const json = JSON.stringify(backupData, null, 2);
@@ -638,7 +858,7 @@ function setupEventListeners(): void {
         const charMappingCount = Object.keys(characterThemeMap).length;
         showModal({
             title: '✓ Success',
-            content: `Exported complete theme backup:<br>• ${presets.length} theme preset(s)<br>• ${charMappingCount} character mapping(s)<br>• Default theme: ${defaultTheme || 'none'}`,
+            content: `Exported complete theme backup:<br>• ${presets.length} theme preset(s)<br>• ${charMappingCount} character mapping(s)<br>• Default theme: ${defaultTheme || 'none'}<br>• Shared CSS: ${sharedCSS ? 'included' : 'none'}`,
             buttons: [
                 { text: 'OK', primary: true, onClick: () => {} }
             ]
@@ -672,7 +892,8 @@ function setupEventListeners(): void {
                             themePresets: data,
                             characterThemeMap: {},
                             defaultTheme: '',
-                            autoSwitchEnabled: false
+                            autoSwitchEnabled: false,
+                            sharedCSS: ''
                         };
                     } else if (data.version && data.themePresets) {
                         // New format: comprehensive backup
@@ -703,11 +924,12 @@ function setupEventListeners(): void {
                     const characterThemeMap = backupData.characterThemeMap || {};
                     const defaultTheme = backupData.defaultTheme || '';
                     const autoSwitchEnabled = backupData.autoSwitchEnabled || false;
+                    const importSharedCSS = backupData.sharedCSS || '';
                     const charMappingCount = Object.keys(characterThemeMap).length;
 
                     const contentMsg = isOldFormat
                         ? `Found ${presets.length} preset(s) (old format).<br>How would you like to import them?`
-                        : `Found complete theme backup:<br>• ${presets.length} theme preset(s)<br>• ${charMappingCount} character mapping(s)<br>• Default theme: ${defaultTheme || 'none'}<br><br>How would you like to import them?`;
+                        : `Found complete theme backup:<br>• ${presets.length} theme preset(s)<br>• ${charMappingCount} character mapping(s)<br>• Default theme: ${defaultTheme || 'none'}<br>• Shared CSS: ${importSharedCSS ? 'included' : 'none'}<br><br>How would you like to import them?`;
 
                     showModal({
                         title: '📥 Import Theme Backup',
@@ -721,12 +943,15 @@ function setupEventListeners(): void {
                                     await saveCharacterThemeMap(characterThemeMap);
                                     await setDefaultTheme(defaultTheme);
                                     await setAutoSwitchEnabled(autoSwitchEnabled);
+                                    if (importSharedCSS) {
+                                        await saveSharedCSS(importSharedCSS);
+                                    }
 
                                     await updatePresetList();
 
                                     showModal({
                                         title: '✓ Success',
-                                        content: `Replaced all theme data:<br>• ${presets.length} preset(s)<br>• ${charMappingCount} character mapping(s)<br>• Default theme: ${defaultTheme || 'none'}`,
+                                        content: `Replaced all theme data:<br>• ${presets.length} preset(s)<br>• ${charMappingCount} character mapping(s)<br>• Default theme: ${defaultTheme || 'none'}<br>• Shared CSS: ${importSharedCSS ? 'restored' : 'none'}`,
                                         buttons: [
                                             { text: 'OK', primary: true, onClick: () => {} }
                                         ]
@@ -762,6 +987,11 @@ function setupEventListeners(): void {
                                     // Set default theme if not already set
                                     if (defaultTheme && !await getDefaultTheme()) {
                                         await setDefaultTheme(defaultTheme);
+                                    }
+
+                                    // Save shared CSS if provided and not already set
+                                    if (importSharedCSS && !await getSharedCSS()) {
+                                        await saveSharedCSS(importSharedCSS);
                                     }
 
                                     await updatePresetList();
@@ -1034,6 +1264,150 @@ function setupEventListeners(): void {
 }
 
 /**
+ * Load editor data when switching to editor tab
+ */
+async function loadEditorData(): Promise<void> {
+    const container = windowState.window;
+    if (!container) return;
+
+    if (!await requestPermission('db')) return;
+
+    const htmlEditor = container.querySelector('#current-html-editor') as HTMLTextAreaElement;
+    const sharedCSSEditor = container.querySelector('#shared-css-editor') as HTMLTextAreaElement;
+    const themeCSSEditor = container.querySelector('#current-css-editor') as HTMLTextAreaElement;
+
+    try {
+        const db = await Risuai.getDatabase(['customCSS', 'guiHTML']);
+        const fullCSS = db?.customCSS || '';
+        const guiHTML = db?.guiHTML || '';
+
+        // Load custom HTML
+        if (htmlEditor) {
+            htmlEditor.value = guiHTML;
+        }
+
+        // Load shared CSS
+        const sharedCSS = await getSharedCSS();
+        if (sharedCSSEditor) {
+            sharedCSSEditor.value = sharedCSS;
+        }
+
+        // Load theme CSS (strip shared CSS part)
+        let themeCSS = fullCSS;
+        if (sharedCSS && fullCSS.startsWith(sharedCSS)) {
+            themeCSS = fullCSS.substring(sharedCSS.length).trim();
+            if (themeCSS.startsWith(SHARED_CSS_SEPARATOR)) {
+                themeCSS = themeCSS.substring(SHARED_CSS_SEPARATOR.length).trim();
+            }
+        }
+        if (themeCSSEditor) {
+            themeCSSEditor.value = themeCSS;
+        }
+    } catch (e) {
+        console.error('Failed to load editor data:', e);
+    }
+}
+
+/**
+ * Setup event listeners for the editor tab
+ */
+function setupEditorEventListeners(): void {
+    const container = windowState.window;
+    if (!container) return;
+
+    // Shared CSS buttons
+    const loadSharedCSSBtn = container.querySelector('#load-shared-css-btn');
+    const saveSharedCSSBtn = container.querySelector('#save-shared-css-btn');
+    const sharedCSSEditor = container.querySelector('#shared-css-editor') as HTMLTextAreaElement;
+
+    loadSharedCSSBtn?.addEventListener('click', async () => {
+        const sharedCSS = await getSharedCSS();
+        if (sharedCSSEditor) {
+            sharedCSSEditor.value = sharedCSS;
+        }
+        showButtonFeedback(loadSharedCSSBtn as HTMLButtonElement, '✓ 불러옴!');
+    });
+
+    saveSharedCSSBtn?.addEventListener('click', async () => {
+        const css = sharedCSSEditor?.value || '';
+        await saveSharedCSS(css);
+        showButtonFeedback(saveSharedCSSBtn as HTMLButtonElement, '✓ 저장됨!');
+    });
+
+    // Current theme CSS buttons
+    const refreshCSSBtn = container.querySelector('#refresh-current-css-btn');
+    const applyCSSBtn = container.querySelector('#apply-current-css-btn');
+    const themeCSSEditor = container.querySelector('#current-css-editor') as HTMLTextAreaElement;
+
+    refreshCSSBtn?.addEventListener('click', async () => {
+        if (!await requestPermission('db')) return;
+        const db = await Risuai.getDatabase(['customCSS']);
+        const fullCSS = db?.customCSS || '';
+        const sharedCSS = await getSharedCSS();
+
+        let themeCSS = fullCSS;
+        if (sharedCSS && fullCSS.startsWith(sharedCSS)) {
+            themeCSS = fullCSS.substring(sharedCSS.length).trim();
+            if (themeCSS.startsWith(SHARED_CSS_SEPARATOR)) {
+                themeCSS = themeCSS.substring(SHARED_CSS_SEPARATOR.length).trim();
+            }
+        }
+        if (themeCSSEditor) {
+            themeCSSEditor.value = themeCSS;
+        }
+        showButtonFeedback(refreshCSSBtn as HTMLButtonElement, '✓ 새로고침!');
+    });
+
+    applyCSSBtn?.addEventListener('click', async () => {
+        if (!await requestPermission('db')) return;
+        const themeCSS = themeCSSEditor?.value || '';
+        const sharedCSS = await getSharedCSS();
+        const finalCSS = combineCSS(sharedCSS, themeCSS);
+
+        await Risuai.setDatabase({ customCSS: finalCSS });
+
+        // Apply to DOM immediately
+        if (await requestPermission('mainDom')) {
+            try {
+                const rootDoc = await Risuai.getRootDocument();
+                let existingStyle = await rootDoc.querySelector('#customcss');
+                if (!existingStyle) {
+                    existingStyle = await rootDoc.querySelector('style[x-id="customcss"]');
+                }
+                if (existingStyle) {
+                    await existingStyle.setInnerHTML(finalCSS);
+                }
+            } catch (e) {
+                console.log('Could not apply CSS directly:', e);
+            }
+        }
+
+        showButtonFeedback(applyCSSBtn as HTMLButtonElement, '✓ 적용됨!');
+    });
+
+    // Custom HTML buttons
+    const refreshHTMLBtn = container.querySelector('#refresh-current-html-btn');
+    const applyHTMLBtn = container.querySelector('#apply-current-html-btn');
+    const htmlEditor = container.querySelector('#current-html-editor') as HTMLTextAreaElement;
+
+    refreshHTMLBtn?.addEventListener('click', async () => {
+        if (!await requestPermission('db')) return;
+        const db = await Risuai.getDatabase(['guiHTML']);
+        if (htmlEditor) {
+            htmlEditor.value = db?.guiHTML || '';
+        }
+        showButtonFeedback(refreshHTMLBtn as HTMLButtonElement, '✓ 새로고침!');
+    });
+
+    applyHTMLBtn?.addEventListener('click', async () => {
+        if (!await requestPermission('db')) return;
+        const html = htmlEditor?.value || '';
+        await Risuai.setDatabase({ guiHTML: html });
+        showButtonFeedback(applyHTMLBtn as HTMLButtonElement, '✓ 적용됨!');
+    });
+}
+
+/**
  * Update the preset list display
  */
 async function updatePresetList(): Promise<void> {
@@ -1157,16 +1531,9 @@ async function updatePresetList(): Promise<void> {
         // Load button
         const loadBtn = item.querySelector('.load-btn');
         loadBtn?.addEventListener('click', async () => {
-            // Hide iframe only if mainDocument permission not yet granted
-            // Note: DB permission implies mainDocument permission (DB is higher level)
-            if (!permissionState.mainDocument && !permissionState.database) {
-                await Risuai.hideContainer();
-                await loadThemePreset(preset.name);
-                permissionState.mainDocument = true;
-                await Risuai.showContainer('fullscreen');
-            } else {
-                await loadThemePreset(preset.name);
-            }
+            // Request mainDom permission lazily - only when actually loading a theme
+            if (!await requestPermission('mainDom')) return;
+            await loadThemePreset(preset.name);
             showButtonFeedback(loadBtn as HTMLButtonElement, '✓ Loaded!');
         });
 

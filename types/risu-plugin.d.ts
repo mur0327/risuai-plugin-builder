@@ -19,6 +19,60 @@
  */
 
 // ============================================================================
+// MCP Types
+// ============================================================================
+
+/**
+ * MCP tool definition
+ */
+interface MCPToolDef {
+    /** Tool name */
+    name: string;
+    /** Tool description */
+    description: string;
+    /** JSON schema for input validation */
+    inputSchema: any;
+    /** Annotations for the tool, can be used for documentation or metadata */
+    annotations?: any;
+}
+
+/**
+ * Text content returned from an MCP tool call
+ */
+interface MCPToolCallTextContent {
+    type: 'text';
+    text: string;
+}
+
+/**
+ * Image or audio content returned from an MCP tool call
+ */
+interface MCPToolCallImageAudioContent {
+    type: 'image' | 'audio';
+    /** Base64 encoded data */
+    data: string;
+    /** e.g. 'image/png', 'image/jpeg' */
+    mimeType: string;
+}
+
+/**
+ * Resource content returned from an MCP tool call
+ */
+interface MCPToolCallResourceContent {
+    type: 'resource';
+    resource: {
+        uri: string;
+        mimeType: string;
+        text: string;
+    };
+}
+
+/**
+ * Content types that can be returned from an MCP tool call
+ */
+type MCPToolCallContent = MCPToolCallTextContent | MCPToolCallImageAudioContent | MCPToolCallResourceContent;
+
+// ============================================================================
 // Core Types
 // ============================================================================
 
@@ -66,18 +120,28 @@ type ReplacerType = 'beforeRequest' | 'afterRequest';
  * Risuai Plugin definition
  */
 interface RisuPlugin {
+    /** Plugin name (identifier) */
     name: string;
+    /** Display name shown in UI */
     displayName?: string;
+    /** Plugin script code */
     script: string;
+    /** Argument type definitions */
     arguments: { [key: string]: 'int' | 'string' | string[] };
+    /** Actual argument values */
     realArg: { [key: string]: number | string };
+    /** API version */
     version?: 1 | 2 | '2.1' | '3.0';
+    /** Custom links for plugin UI */
     customLink: {
         link: string;
         hoverText?: string;
     }[];
+    /** Argument metadata */
     argMeta: { [key: string]: { [key: string]: string } };
+    /** Plugin version string */
     versionOfPlugin?: string;
+    /** Update check URL */
     updateURL?: string;
 }
 
@@ -85,19 +149,33 @@ interface RisuPlugin {
  * Risuai Module definition
  */
 interface RisuModule {
+    /** Module name */
     name: string;
+    /** Module description */
     description: string;
+    /** Lorebook entries */
     lorebook?: any[];
+    /** Regex scripts */
     regex?: any[];
+    /** CommonJS code */
     cjs?: string;
+    /** Trigger scripts */
     trigger?: any[];
+    /** Module ID */
     id: string;
+    /** Low level system access */
     lowLevelAccess?: boolean;
+    /** Hide icon in UI */
     hideIcon?: boolean;
+    /** Background embedding */
     backgroundEmbedding?: string;
+    /** Module assets */
     assets?: [string, string, string][];
+    /** Module namespace */
     namespace?: string;
+    /** Custom module toggle */
     customModuleToggle?: string;
+    /** MCP module configuration */
     mcp?: any;
 }
 
@@ -105,11 +183,17 @@ interface RisuModule {
  * User persona definition
  */
 interface Persona {
+    /** Persona prompt/description */
     personaPrompt: string;
+    /** Persona name */
     name: string;
+    /** Persona icon */
     icon: string;
+    /** Use large portrait */
     largePortrait?: boolean;
+    /** Persona ID */
     id?: string;
+    /** Persona note */
     note?: string;
 }
 
@@ -118,33 +202,59 @@ interface Persona {
  * Plugins can only access these specific database properties for security.
  */
 interface DatabaseSubset {
+    /** Array of characters and group chats */
     characters?: any[];
+    /** Risuai modules */
     modules?: RisuModule[];
+    /** Enabled module IDs */
     enabledModules?: string[];
+    /** Module integration settings */
     moduleIntergration?: string;
+    /** Plugin V2 instances */
     pluginV2?: RisuPlugin[];
+    /** User personas */
     personas?: Persona[];
+    /** Plugin instances */
     plugins?: RisuPlugin[];
+    /** Plugin custom storage object */
     pluginCustomStorage?: { [key: string]: any };
+    /** AI temperature setting (0-100) */
     temperature?: number;
+    /** Ask before removing messages */
     askRemoval?: boolean;
+    /** Maximum context tokens */
     maxContext?: number;
+    /** Maximum response tokens */
     maxResponse?: number;
+    /** Frequency penalty (0-100) */
     frequencyPenalty?: number;
+    /** Presence penalty (0-100) */
     PresensePenalty?: number;
+    /** UI theme name */
     theme?: string;
+    /** Text theme name */
     textTheme?: string;
+    /** Line height setting */
     lineHeight?: number;
+    /** Use separate models for auxiliary models */
     seperateModelsForAxModels?: boolean;
+    /** Separate model configurations */
     seperateModels?: {
         memory: string;
         emotion: string;
         translate: string;
         otherAx: string;
     };
+    /** Custom CSS styles */
     customCSS?: string;
+    /** Custom GUI HTML */
     guiHTML?: string;
+    /** Color scheme name */
     colorSchemeName?: string;
+    /** Character order */
+    characterOrder?: any;
+    /** Selected persona */
+    selectedPersona?: any;
 }
 
 // ============================================================================
@@ -293,6 +403,19 @@ interface PluginStorage {
 }
 
 /**
+ * Device-local storage with generic type support.
+ * Uses generic types for flexible value storage.
+ * Storage is shared between all plugins under a common prefix.
+ */
+interface SafeLocalPluginStorage {
+    getItem<T>(key: string): Promise<T | null>;
+    setItem<T>(key: string, value: T): Promise<void>;
+    removeItem(key: string): Promise<void>;
+    keys(): Promise<string[]>;
+    clear(): Promise<void>;
+}
+
+/**
  * Device-specific storage shared between plugins.
  * All methods return Promises.
  */
@@ -370,9 +493,57 @@ interface RisuaiPluginAPI {
     /** @deprecated Use setCharacter() instead */
     setChar(character: any): Promise<void>;
 
+    /**
+     * Gets a character by index
+     * @param index - Character index
+     * @returns Character object or null if not found
+     */
+    getCharacterFromIndex(index: number): Promise<any | null>;
+
+    /**
+     * Saves a character at a specific index
+     * @param index - Character index
+     * @param character - Character object to save
+     */
+    setCharacterToIndex(index: number, character: any): Promise<void>;
+
+    /**
+     * Gets a chat by index
+     * @param characterIndex - Character index
+     * @param chatIndex - Chat index
+     * @returns Chat object or null if not found
+     */
+    getChatFromIndex(characterIndex: number, chatIndex: number): Promise<any | null>;
+
+    /**
+     * Saves a chat at a specific index
+     * @param characterIndex - Character index
+     * @param chatIndex - Chat index
+     * @param chat - Chat object to save
+     */
+    setChatToIndex(characterIndex: number, chatIndex: number, chat: any): Promise<void>;
+
+    /**
+     * Gets the current character index
+     * @returns Current character index
+     */
+    getCurrentCharacterIndex(): Promise<number>;
+
+    /**
+     * Gets the current chat index
+     * @returns Current chat index
+     */
+    getCurrentChatIndex: () => Promise<number>;
+
     // Storage APIs
     pluginStorage: PluginStorage;
     safeLocalStorage: SafeLocalStorage;
+
+    /**
+     * Gets a device-local storage instance shared between plugins
+     * @returns SafeLocalPluginStorage instance for device-local storage
+     */
+    getLocalPluginStorage(): Promise<SafeLocalPluginStorage>;
 
     // Argument APIs
     getArgument(key: string): Promise<string | number | undefined>;
@@ -383,7 +554,12 @@ interface RisuaiPluginAPI {
     setArg(arg: string, value: string | number): void;
 
     // Database APIs
-    getDatabase(): Promise<DatabaseSubset | null>;
+    /**
+     * Gets the database with limited access
+     * @param includeOnly - Array of keys to include or 'all' for all allowed keys. Defaults to 'all'.
+     * @returns DatabaseSubset object (limited to allowed keys) or null if consent not given
+     */
+    getDatabase(includeOnly?: string[] | 'all'): Promise<DatabaseSubset | null>;
     setDatabaseLite(db: DatabaseSubset): Promise<void>;
     setDatabase(db: DatabaseSubset): Promise<void>;
 
@@ -409,6 +585,30 @@ interface RisuaiPluginAPI {
     ): Promise<UIPartResponse>;
 
     unregisterUIPart(id: string): Promise<void>;
+
+    // MCP APIs
+    /**
+     * Registers a custom MCP (Model Context Protocol) module
+     * @param arg - MCP module configuration
+     * @param getToolList - Function that returns the list of available tools
+     * @param callTool - Function that handles tool invocations
+     */
+    registerMCP(
+        arg: {
+            identifier: string;
+            name: string;
+            version: string;
+            description: string;
+        },
+        getToolList: () => Promise<MCPToolDef[]>,
+        callTool: (toolName: string, content: any) => Promise<MCPToolCallContent[]>
+    ): Promise<void>;
+
+    /**
+     * Unregisters a previously registered MCP module
+     * @param identifier - The identifier used when registering the MCP module
+     */
+    unregisterMCP(identifier: string): Promise<void>;
 
     // Provider APIs
     addProvider(
@@ -438,9 +638,28 @@ interface RisuaiPluginAPI {
     ): Promise<void>;
     removeRisuReplacer(type: ReplacerType, func: Function): Promise<void>;
 
+    // Body Interceptors
+    /**
+     * Registers a body interceptor that can read and replace HTTP request bodies on LLM requests.
+     * Sensitive fields like API keys are excluded from the body passed to the callback.
+     * Requires 'replacer' permission.
+     *
+     * @param callback - Function that receives the request body and request type, and returns the modified body
+     * @returns Object with an `id` for later unregistration, or null if permission was denied
+     */
+    registerBodyIntercepter(
+        callback: (body: any, type: string) => any
+    ): Promise<{ id: string } | null>;
+
+    /**
+     * Unregisters a previously registered body interceptor
+     * @param id - The interceptor ID returned by registerBodyIntercepter
+     */
+    unregisterBodyIntercepter(id: string): Promise<void>;
+
     // Asset Management
     readImage(path?: string): Promise<any>;
-    saveAsset(data: any, path?: string): Promise<void>;
+    saveAsset(data: any): Promise<string>;
 
     // Plugin Management
     loadPlugins(): Promise<void>;
@@ -463,7 +682,30 @@ interface RisuaiPluginAPI {
         platform: string;
         saveMethod: string;
     }>;
+
+    /**
+     * Requests permission for a specific action
+     * @param permission - Permission string (e.g. 'fetchLogs'|'db'|'mainDom')
+     * @returns True if permission granted, false otherwise
+     */
+    requestPluginPermission(permission: string): Promise<boolean>;
+
     unwarpSafeArray<T>(safeArray: SafeClassArray<T>): Promise<T[]>;
+
+    // Translation Cache APIs
+    /**
+     * Searches the LLM translation cache for entries whose key contains the given partial key
+     * @param partialKey - A substring to match against cache keys
+     * @returns Array of matching cache entries with key and value
+     */
+    searchTranslationCache(partialKey: string): Promise<{key: string, value: string}[]>;
+
+    /**
+     * Gets a single entry from the LLM translation cache by exact key
+     * @param key - The exact cache key to look up
+     * @returns The cached translation or null if not found
+     */
+    getTranslationCache(key: string): Promise<string | null>;
 }
 
 // ============================================================================

@@ -4,14 +4,15 @@
  * Arguments are only read for migration from old versions
  */
 
-import { PLUGIN_NAME } from './constants';
+import { PLUGIN_NAME, SHARED_CSS_SEPARATOR } from './constants';
 import type { ThemePreset, CharacterThemeMap } from './types';
 
 // Storage keys - data stored as JSON strings to avoid Svelte Proxy issues
 const STORAGE_KEYS = {
     PRESETS: 'presets',
     CHARACTER_THEME_MAP: 'characterThemeMap',
-    DEFAULT_THEME: 'defaultTheme'
+    DEFAULT_THEME: 'defaultTheme',
+    SHARED_CSS: 'sharedCSS'
 } as const;
 
 /**
@@ -22,6 +23,58 @@ function deepClone<T>(obj: T): T {
         return obj;
     }
     return JSON.parse(JSON.stringify(obj));
+}
+
+/**
+ * Get shared CSS from pluginStorage
+ */
+export async function getSharedCSS(): Promise<string> {
+    try {
+        const data = await Risuai.pluginStorage.getItem(STORAGE_KEYS.SHARED_CSS);
+        return (typeof data === 'string') ? data : '';
+    } catch (e) {
+        console.error('Failed to get shared CSS:', e);
+        return '';
+    }
+}
+
+/**
+ * Save shared CSS to pluginStorage
+ */
+export async function saveSharedCSS(css: string): Promise<void> {
+    try {
+        await Risuai.pluginStorage.setItem(STORAGE_KEYS.SHARED_CSS, css);
+        console.log('Shared CSS saved successfully');
+    } catch (e) {
+        console.error('Failed to save shared CSS:', e);
+    }
+}
+
+/**
+ * Split full CSS into shared and theme parts using separator
+ */
+export function splitCSS(fullCSS: string): { sharedCSS: string; themeCSS: string } {
+    const separatorIndex = fullCSS.indexOf(SHARED_CSS_SEPARATOR);
+    if (separatorIndex === -1) {
+        return {
+            sharedCSS: '',
+            themeCSS: fullCSS
+        };
+    }
+    return {
+        sharedCSS: fullCSS.substring(0, separatorIndex).trim(),
+        themeCSS: fullCSS.substring(separatorIndex + SHARED_CSS_SEPARATOR.length).trim()
+    };
+}
+
+/**
+ * Combine shared CSS and theme CSS with separator
+ */
+export function combineCSS(sharedCSS: string, themeCSS: string): string {
+    if (!sharedCSS && !themeCSS) return '';
+    if (!sharedCSS) return themeCSS;
+    if (!themeCSS) return sharedCSS + '\n\n' + SHARED_CSS_SEPARATOR + '\n';
+    return sharedCSS + '\n\n' + SHARED_CSS_SEPARATOR + '\n\n' + themeCSS;
 }
 
 /**
@@ -85,13 +138,25 @@ export async function reorderPresets(fromIndex: number, toIndex: number): Promis
  * API v3.0 doesn't allow colorScheme in allowedDbKeys, so we can't restore them anyway
  */
 export async function saveCurrentTheme(presetName: string): Promise<ThemePreset> {
-    // Deep clone to avoid Proxy issues
-    const db = deepClone(await Risuai.getDatabase());
+    // Only fetch needed theme fields (avoid fetching entire DB)
+    const db = deepClone(await Risuai.getDatabase(['customCSS', 'guiHTML', 'theme', 'colorSchemeName', 'textTheme']));
     const presets = await getPresets();
+
+    // Strip shared CSS from customCSS - only save theme-specific CSS
+    let cssToSave = db?.customCSS || '';
+    const sharedCSS = await getSharedCSS();
+    const fullCSS = cssToSave;
+
+    if (sharedCSS && fullCSS.startsWith(sharedCSS)) {
+        cssToSave = fullCSS.substring(sharedCSS.length).trim();
+        if (cssToSave.startsWith(SHARED_CSS_SEPARATOR)) {
+            cssToSave = cssToSave.substring(SHARED_CSS_SEPARATOR.length).trim();
+        }
+    }
 
     const newPreset: ThemePreset = {
         name: presetName,
-        customCSS: db?.customCSS || '',
+        customCSS: cssToSave,
         guiHTML: db?.guiHTML || '',
         theme: db?.theme || '',
         colorSchemeName: db?.colorSchemeName || '',
@@ -127,10 +192,15 @@ export async function loadThemePreset(presetName: string): Promise<boolean> {
         return false;
     }
 
+    // Combine shared CSS with theme CSS
+    const sharedCSS = await getSharedCSS();
+    const themeCSS = preset.customCSS || '';
+    const finalCSS = combineCSS(sharedCSS, themeCSS);
+
     // Build update object with only the keys we can set
     // Note: colorScheme/customTextTheme are NOT in allowedDbKeys, so we only set names
     const dbUpdate: Record<string, any> = {
-        customCSS: preset.customCSS || '',
+        customCSS: finalCSS,
         guiHTML: preset.guiHTML || '',
         theme: preset.theme || '',
         colorSchemeName: preset.colorSchemeName || '',
@@ -140,7 +210,7 @@ export async function loadThemePreset(presetName: string): Promise<boolean> {
     await Risuai.setDatabase(dbUpdate);
 
     // Apply customCSS immediately to DOM via SafeDocument
-    const customCSS = preset.customCSS || '';
+    const customCSS = finalCSS;
     try {
         const rootDoc = await Risuai.getRootDocument();
         // Look for existing customcss style tag

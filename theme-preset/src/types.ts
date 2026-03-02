@@ -41,4 +41,5 @@ export interface WindowState {
     isDragging: boolean;
     dragOffset: { x: number; y: number };
     isVisible?: boolean;
+    currentTab?: string;
 }

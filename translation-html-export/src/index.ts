@@ -1,71 +1,13 @@
-/// <reference types="../../types/risu-plugin" />
+/**
+ * Translation HTML Export Plugin
+ * API v3.0 - Export chat as HTML with cached translations
+ * Uses risuai.searchTranslationCache / getTranslationCache API
+ */
 
-// ===== Plugin Config =====
-//@name TranslationHTMLExport
-//@display-name 📄 HTML Export (From Cache) v0.1.1
-//@version 0.1.1
-//@description Export chat as HTML with cached translations
+// ============================================================================
+// Translation Cache Logic
+// ============================================================================
 
-//@arg enable_plugin int 1 "플러그인 활성화 (1=ON)"
-
-import localforage from 'localforage';
-
-const LLMCacheStorage = localforage.createInstance({
-    name: "LLMTranslateCache"
-});
-
-// ===== Plugin Enable Check =====
-const PLUGIN_NAME = "translation-html-export";
-const DISPLAY_NAME = "📄 HTML Export (From Cache) v0.1.1";
-
-function getArg(key: string, defaultVal: string = ""): string {
-    try {
-        const g = globalThis as any;
-        const apis = g.__pluginApis__ || {};
-
-        // 1. getArg API로 여러 형태 시도
-        if (typeof apis.getArg === "function") {
-            let v = apis.getArg(key);
-            if (v !== undefined && v !== null) return String(v);
-
-            v = apis.getArg(`${PLUGIN_NAME}::${key}`);
-            if (v !== undefined && v !== null) return String(v);
-
-            v = apis.getArg(`${DISPLAY_NAME}::${key}`);
-            if (v !== undefined && v !== null) return String(v);
-        }
-
-        // 2. __pluginParams__에서 찾기
-        const params = g.__pluginParams__?.args || g.__pluginParams__ || {};
-        if (params[key] !== undefined) return String(params[key]);
-
-        // 3. localStorage 폴백
-        const lsKey = `the_${key}`;
-        const lsVal = localStorage.getItem(lsKey);
-        if (lsVal !== null) return lsVal;
-    } catch {}
-
-    return defaultVal;
-}
-
-function getPluginEnabled(): boolean {
-    const val = getArg("enable_plugin", "1");
-    const enabled = Number(val) === 1;
-    console.log(`[THE] enable_plugin = "${val}", enabled = ${enabled}`);
-    return enabled;
-}
-
-// 캐시 키 목록 (한 번만 로드)
-let cachedKeys: string[] | null = null;
-
-async function loadCacheKeys(): Promise<string[]> {
-    if (cachedKeys === null) {
-        cachedKeys = await LLMCacheStorage.keys();
-    }
-    return cachedKeys;
-}
-
-// 평문 청크 추출 (가장 긴 것)
 function extractLongestPlainChunk(text: string): string {
     const chunks = text
         .split(/\[.*?\]|<[^>]*>|\{\{.*?\}\}/gs)
@@ -75,50 +17,42 @@ function extractLongestPlainChunk(text: string): string {
     return chunks.sort((a, b) => b.length - a.length)[0] || '';
 }
 
-// 캐시에서 번역 찾기
-async function findTranslation(originalText: string): Promise<{ found: boolean; translation?: string; matchType?: string }> {
-    // 1. 정확 매칭 시도
-    const exactMatch = await LLMCacheStorage.getItem(originalText);
+async function findTranslation(originalText: string): Promise<{ found: boolean; translation?: string }> {
+    const exactMatch = await Risuai.getTranslationCache(originalText);
     if (exactMatch) {
-        return { found: true, translation: exactMatch as string, matchType: 'exact' };
+        return { found: true, translation: exactMatch };
     }
 
-    // 2. 청크 매칭 시도
     const chunk = extractLongestPlainChunk(originalText);
     if (!chunk) {
         return { found: false };
     }
 
-    const keys = await loadCacheKeys();
-    const matches: string[] = [];
+    const entries = await Risuai.searchTranslationCache(chunk);
 
-    // 길이 범위 제한 (원본의 ±50%)
     const minLength = originalText.length * 0.5;
     const maxLength = originalText.length * 1.5;
 
-    for (const key of keys) {
-        if (key.includes(chunk) && key.length >= minLength && key.length <= maxLength) {
-            matches.push(key);
-        }
-    }
+    const matches = entries.filter(e => e.key.length >= minLength && e.key.length <= maxLength);
 
     if (matches.length === 0) {
         return { found: false };
     }
 
-    // 여러 개면 길이가 가장 비슷한 것 선택
     if (matches.length > 1) {
         const originalLength = originalText.length;
         matches.sort((a, b) =>
-            Math.abs(a.length - originalLength) - Math.abs(b.length - originalLength)
+            Math.abs(a.key.length - originalLength) - Math.abs(b.key.length - originalLength)
         );
     }
 
-    const translation = await LLMCacheStorage.getItem(matches[0]);
-    return { found: true, translation: translation as string, matchType: 'chunk' };
+    return { found: true, translation: matches[0].value };
 }
 
-// HTML 이스케이프
+// ============================================================================
+// Text Utilities
+// ============================================================================
+
 function escapeHtml(text: string): string {
     return text
         .replace(/&/g, '&amp;')
@@ -128,115 +62,180 @@ function escapeHtml(text: string): string {
         .replace(/'/g, '&#039;');
 }
 
-// 마크다운 간단 변환 (기본적인 것만)
 function simpleMarkdown(text: string): string {
     return text
-        // 볼드
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        // 이탤릭
         .replace(/\*(.+?)\*/g, '<em>$1</em>')
-        // 큰따옴표 대사 (escapeHtml 후라 &quot; 사용)
         .replace(/&quot;(.+?)&quot;/g, '<mark class="quote2">&quot;$1&quot;</mark>')
-        // 스마트 큰따옴표 "" (curly quotes)
         .replace(/\u201C(.+?)\u201D/g, '<mark class="quote2">\u201C$1\u201D</mark>')
-        // 스마트 작은따옴표 '' (curly quotes) - 일반 '는 apostrophe와 구분 불가
         .replace(/\u2018(.+?)\u2019/g, '<mark class="quote1">\u2018$1\u2019</mark>')
-        // 줄바꿈
         .replace(/\n/g, '<br>');
 }
 
-// 메인 내보내기 함수
-async function exportChatWithTranslation() {
-    const char = getChar();
+// ============================================================================
+// UI Styles
+// ============================================================================
 
-    if (!char || !char.chats || char.chats.length === 0) {
-        alertError('No chat found');
-        return;
+const STYLES = `
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        display: flex;
+        justify-content: center;
+        padding: 24px;
     }
-
-    const currentChat = char.chats[char.chatPage || 0];
-    if (!currentChat?.message) {
-        alertError('No messages in current chat');
-        return;
+    .wrap { max-width: 600px; width: 100%; }
+    h1 { font-size: 20px; margin-bottom: 20px; }
+    .progress-box {
+        background: #16213e;
+        border: 1px solid #333;
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 16px;
     }
+    .progress-bar-bg {
+        width: 100%;
+        height: 8px;
+        background: #333;
+        border-radius: 4px;
+        overflow: hidden;
+        margin: 12px 0;
+    }
+    .progress-bar {
+        height: 100%;
+        background: #3b82f6;
+        border-radius: 4px;
+        transition: width 0.2s;
+        width: 0%;
+    }
+    .status { font-size: 13px; color: #888; }
+    .stats {
+        display: flex;
+        gap: 16px;
+        margin-top: 12px;
+    }
+    .stat {
+        background: #1a1a3e;
+        padding: 10px 16px;
+        border-radius: 8px;
+        font-size: 13px;
+        flex: 1;
+        text-align: center;
+    }
+    .stat .num { font-size: 22px; font-weight: 700; margin-bottom: 2px; }
+    .stat.found .num { color: #34d399; }
+    .stat.missed .num { color: #f59e0b; }
+    .btn {
+        padding: 10px 20px;
+        border-radius: 8px;
+        border: none;
+        font-size: 14px;
+        cursor: pointer;
+        margin-right: 8px;
+    }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:disabled { background: #333; color: #666; cursor: default; }
+    .btn-secondary { background: none; border: 1px solid #555; color: #e0e0e0; }
+    .actions { margin-top: 16px; display: flex; gap: 8px; }
+    .error { color: #f87171; padding: 20px; text-align: center; }
+`;
 
-    // 캐시 키 미리 로드
-    alertWait('Loading translation cache...');
-    cachedKeys = null; // 리셋
-    await loadCacheKeys();
+// ============================================================================
+// UI Rendering
+// ============================================================================
 
-    const messages = currentChat.message;
-    const totalMessages = messages.length + 1; // +1 for firstMessage
+function renderInitialUI(charName: string, totalMessages: number) {
+    document.body.innerHTML = `
+        <style>${STYLES}</style>
+        <div class="wrap">
+            <h1>Export: ${escapeHtml(charName)}</h1>
+            <div class="progress-box">
+                <div class="status" id="statusText">Preparing...</div>
+                <div class="progress-bar-bg"><div class="progress-bar" id="progressBar"></div></div>
+                <div class="status" id="progressText">0 / ${totalMessages}</div>
+            </div>
+            <div class="stats">
+                <div class="stat found">
+                    <div class="num" id="foundCount">0</div>
+                    <div>Cached</div>
+                </div>
+                <div class="stat missed">
+                    <div class="num" id="missedCount">0</div>
+                    <div>No cache</div>
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" id="downloadBtn" disabled>Download</button>
+                <button class="btn btn-secondary" id="closeBtn">Close</button>
+            </div>
+        </div>
+    `;
 
-    // 번역 결과 수집
-    const results: { name: string; original: string; translated?: string; found: boolean }[] = [];
-    let foundCount = 0;
-    let notFoundCount = 0;
-
-    // 1. First Message 처리
-    alertWait(`Processing first message... (1/${totalMessages})`);
-    const fmIndex = currentChat.fmIndex ?? -1;
-    const firstMessage = fmIndex === -1
-        ? char.firstMessage
-        : (char.alternateGreetings?.[fmIndex] || char.firstMessage);
-
-    const fmResult = await findTranslation(firstMessage);
-    results.push({
-        name: char.name,
-        original: firstMessage,
-        translated: fmResult.translation,
-        found: fmResult.found
+    document.getElementById('closeBtn')!.addEventListener('click', async () => {
+        await Risuai.hideContainer();
     });
-    if (fmResult.found) foundCount++; else notFoundCount++;
+}
 
-    // 2. 채팅 메시지 처리
-    for (let i = 0; i < messages.length; i++) {
-        alertWait(`Processing messages... (${i + 2}/${totalMessages})`);
+function updateProgress(current: number, total: number, found: number, missed: number) {
+    const pct = Math.round((current / total) * 100);
+    (document.getElementById('progressBar') as HTMLElement).style.width = `${pct}%`;
+    document.getElementById('progressText')!.textContent = `${current} / ${total}`;
+    document.getElementById('statusText')!.textContent = `Processing messages...`;
+    document.getElementById('foundCount')!.textContent = String(found);
+    document.getElementById('missedCount')!.textContent = String(missed);
+}
 
-        const msg = messages[i];
-        const isUser = msg.role === 'user';
-        const name = msg.saying
-            ? (findCharacterbyId(msg.saying)?.name || char.name)
-            : (isUser ? getUserName() : char.name);
+function showComplete(found: number, missed: number, filename: string, htmlContent: string) {
+    document.getElementById('statusText')!.textContent = 'Done!';
+    (document.getElementById('progressBar') as HTMLElement).style.width = '100%';
+    document.getElementById('foundCount')!.textContent = String(found);
+    document.getElementById('missedCount')!.textContent = String(missed);
 
-        const translationResult = await findTranslation(msg.data);
-        results.push({
-            name,
-            original: msg.data,
-            translated: translationResult.translation,
-            found: translationResult.found
-        });
+    const downloadBtn = document.getElementById('downloadBtn') as HTMLButtonElement;
+    downloadBtn.disabled = false;
+    downloadBtn.addEventListener('click', () => {
+        const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    });
+}
 
-        if (translationResult.found) foundCount++; else notFoundCount++;
-    }
+function showError(message: string) {
+    document.body.innerHTML = `
+        <style>${STYLES}</style>
+        <div class="wrap">
+            <div class="error">${escapeHtml(message)}</div>
+            <div class="actions">
+                <button class="btn btn-secondary" id="closeBtn">Close</button>
+            </div>
+        </div>
+    `;
+    document.getElementById('closeBtn')!.addEventListener('click', async () => {
+        await Risuai.hideContainer();
+    });
+}
 
-    alertClear();
+// ============================================================================
+// HTML Generation
+// ============================================================================
 
-    // 3. 캐시 없는 메시지가 있으면 안내
-    if (notFoundCount > 0) {
-        const proceedOption = await alertSelect([
-            `Export anyway (${notFoundCount} messages without translation)`,
-            `Cancel (translate in RisuAI first)`
-        ]);
-
-        if (proceedOption === '1') {
-            alertNormal(`Please translate the chat in RisuAI first, then try exporting again.`);
-            return;
-        }
-    }
-
-    const useTranslation = true; // 항상 번역 사용 (캐시 있는 것만)
-
-    // 4. HTML 생성
+function generateExportHTML(
+    charName: string,
+    results: { name: string; original: string; translated?: string; found: boolean }[],
+    foundCount: number
+): string {
     let chatContentHTML = '';
 
     for (const result of results) {
-        const content = useTranslation && result.translated
-            ? result.translated
-            : result.original;
-
+        const content = result.translated || result.original;
         const displayContent = simpleMarkdown(escapeHtml(content));
-        const notFoundBadge = useTranslation && !result.found
+        const notFoundBadge = !result.found
             ? '<span style="color: #f59e0b; font-size: 0.75rem; margin-left: 8px;">[No cache]</span>'
             : '';
 
@@ -248,11 +247,11 @@ async function exportChatWithTranslation() {
     }
 
     const date = new Date().toISOString().split('T')[0];
-    const html = `<!DOCTYPE html>
+    return `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>${escapeHtml(char.name)} Chat - ${date}</title>
+    <title>${escapeHtml(charName)} Chat - ${date}</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -276,258 +275,139 @@ async function exportChatWithTranslation() {
             border-bottom: 1px solid #333;
             margin-bottom: 10px;
         }
-        .header h1 {
-            margin: 0;
-            color: #fff;
-        }
-        .header p {
-            margin: 8px 0 0 0;
-            color: #888;
-            font-size: 0.9rem;
-        }
+        .header h1 { margin: 0; color: #fff; }
+        .header p { margin: 8px 0 0 0; color: #888; font-size: 0.9rem; }
         .chat {
             background: #2a2a2a;
             padding: 16px;
             border-radius: 12px;
             border: 1px solid #333;
         }
-        h2 {
-            margin: 0 0 12px 0;
-            font-size: 1rem;
-            color: #60a5fa;
-        }
-        .chat div {
-            line-height: 1.7;
-            word-break: break-word;
-        }
-        strong {
-            color: #fff;
-        }
-        em {
-            color: #a5b4fc;
-        }
-        mark.quote1 {
-            background: transparent;
-            color: #8BE9FD;
-        }
-        mark.quote2 {
-            background: transparent;
-            color: #FFB86C;
-        }
+        h2 { margin: 0 0 12px 0; font-size: 1rem; color: #60a5fa; }
+        .chat div { line-height: 1.7; word-break: break-word; }
+        strong { color: #fff; }
+        em { color: #a5b4fc; }
+        mark.quote1 { background: transparent; color: #8BE9FD; }
+        mark.quote2 { background: transparent; color: #FFB86C; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>${escapeHtml(char.name)}</h1>
-            <p>Exported on ${date} | ${results.length} messages${useTranslation ? ` | Translated: ${foundCount}` : ''}</p>
+            <h1>${escapeHtml(charName)}</h1>
+            <p>Exported on ${date} | ${results.length} messages | Translated: ${foundCount}</p>
         </div>
         ${chatContentHTML}
     </div>
 </body>
 </html>`;
+}
 
-    // 5. 다운로드
+// ============================================================================
+// Main Export
+// ============================================================================
+
+async function getPersonaName(): Promise<string> {
+    try {
+        const db = await Risuai.getDatabase();
+        if (db?.personas && db?.selectedPersona) {
+            const persona = db.personas.find((p: any) => p.id === db.selectedPersona);
+            if (persona?.name) return persona.name;
+        }
+    } catch (e) {}
+    return 'User';
+}
+
+async function exportChatWithTranslation() {
+    // Fetch data before showing container (permission popups need to be clickable)
+    let char: any;
+    try {
+        char = await Risuai.getCharacter();
+    } catch (e) {
+        await Risuai.showContainer('fullscreen');
+        showError('Failed to get character data.');
+        return;
+    }
+
+    if (!char?.chats?.length) {
+        await Risuai.showContainer('fullscreen');
+        showError('No chat found.');
+        return;
+    }
+
+    const currentChat = char.chats[char.chatPage || 0];
+    if (!currentChat?.message) {
+        await Risuai.showContainer('fullscreen');
+        showError('No messages in current chat.');
+        return;
+    }
+
+    const userName = await getPersonaName();
+
+    await Risuai.showContainer('fullscreen');
+    const messages = currentChat.message;
+    const totalMessages = messages.length + 1;
+
+    renderInitialUI(char.name, totalMessages);
+
+    const results: { name: string; original: string; translated?: string; found: boolean }[] = [];
+    let foundCount = 0;
+    let notFoundCount = 0;
+
+    // 1. First Message
+    const fmIndex = currentChat.fmIndex ?? -1;
+    const firstMessage = fmIndex === -1
+        ? char.firstMessage
+        : (char.alternateGreetings?.[fmIndex] || char.firstMessage);
+
+    const fmResult = await findTranslation(firstMessage);
+    results.push({ name: char.name, original: firstMessage, translated: fmResult.translation, found: fmResult.found });
+    if (fmResult.found) foundCount++; else notFoundCount++;
+    updateProgress(1, totalMessages, foundCount, notFoundCount);
+
+    // 2. Chat messages
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const name = msg.role === 'user' ? userName : char.name;
+
+        const translationResult = await findTranslation(msg.data);
+        results.push({ name, original: msg.data, translated: translationResult.translation, found: translationResult.found });
+
+        if (translationResult.found) foundCount++; else notFoundCount++;
+
+        if (i % 5 === 0) {
+            updateProgress(i + 2, totalMessages, foundCount, notFoundCount);
+        }
+    }
+
+    // 3. Generate & show download
+    const date = new Date().toISOString().split('T')[0];
     const filename = `${char.name}_${date}_chat`.replace(/[<>:"/\\|?*.,]/g, '') + '.html';
-    await downloadFile(filename, Buffer.from(html, 'utf-8'));
+    const htmlContent = generateExportHTML(char.name, results, foundCount);
 
-    alertNormal(`Exported: ${filename}`);
+    showComplete(foundCount, notFoundCount, filename, htmlContent);
 }
 
-// ===== Styles =====
-const style = document.createElement("style");
-style.id = 'the-float-style';
-style.textContent = `
-    .the-float-container{position:fixed;bottom:10%;right:3%;z-index:9998;cursor:move;touch-action:none;user-select:none}
-    .the-export-btn{
-        padding:8px 12px;
-        border:1px solid #475569;
-        border-radius:8px;
-        background:rgba(15,23,42,0.9);
-        color:#cbd5e1;
-        font-size:12px;
-        box-shadow:0 2px 8px rgba(0,0,0,0.3);
-        cursor:pointer;
-        white-space:nowrap;
-    }
-    .the-export-btn:hover{background:rgba(30,41,59,0.95);color:#e5e7eb}
-    .the-export-btn.busy{opacity:.65;cursor:wait;pointer-events:none}
-`;
+// ============================================================================
+// Plugin Initialization
+// ============================================================================
 
-// ===== Drag State =====
-let globalDragState = { isDragging: false, hasMoved: false, startX: 0, startY: 0, startBottom: 0, startRight: 0 };
-
-function setupDragHandlers(container: HTMLElement) {
-    const DRAG_THRESHOLD = 5;
-
-    // Touch handlers
-    container.addEventListener('touchstart', (e) => {
-        const touch = e.touches[0];
-        globalDragState.isDragging = true;
-        globalDragState.hasMoved = false;
-        globalDragState.startX = touch.clientX;
-        globalDragState.startY = touch.clientY;
-        const rect = container.getBoundingClientRect();
-        globalDragState.startBottom = ((window.innerHeight - rect.bottom) / window.innerHeight) * 100;
-        globalDragState.startRight = ((window.innerWidth - rect.right) / window.innerWidth) * 100;
-        container.style.transition = 'none';
-    }, { passive: true });
-
-    container.addEventListener('touchmove', (e) => {
-        if (!globalDragState.isDragging) return;
-        e.preventDefault();
-        const touch = e.touches[0];
-        const deltaX = touch.clientX - globalDragState.startX;
-        const deltaY = touch.clientY - globalDragState.startY;
-
-        if (Math.abs(deltaX) > DRAG_THRESHOLD || Math.abs(deltaY) > DRAG_THRESHOLD) {
-            globalDragState.hasMoved = true;
-        }
-
-        const deltaBottomPercent = (deltaY / window.innerHeight) * 100;
-        const deltaRightPercent = (deltaX / window.innerWidth) * 100;
-
-        container.style.bottom = (globalDragState.startBottom - deltaBottomPercent) + '%';
-        container.style.right = (globalDragState.startRight - deltaRightPercent) + '%';
-    }, { passive: false });
-
-    container.addEventListener('touchend', () => {
-        setTimeout(() => { globalDragState.isDragging = false; globalDragState.hasMoved = false; }, 100);
-    }, { passive: true });
-
-    // Mouse handlers
-    container.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        globalDragState.isDragging = true;
-        globalDragState.hasMoved = false;
-        globalDragState.startX = e.clientX;
-        globalDragState.startY = e.clientY;
-        const rect = container.getBoundingClientRect();
-        globalDragState.startBottom = ((window.innerHeight - rect.bottom) / window.innerHeight) * 100;
-        globalDragState.startRight = ((window.innerWidth - rect.right) / window.innerWidth) * 100;
-        container.style.transition = 'none';
-    });
-
-    const onMouseMove = (e: MouseEvent) => {
-        if (!globalDragState.isDragging) return;
-        e.preventDefault();
-        const deltaX = e.clientX - globalDragState.startX;
-        const deltaY = e.clientY - globalDragState.startY;
-
-        if (Math.abs(deltaX) > DRAG_THRESHOLD || Math.abs(deltaY) > DRAG_THRESHOLD) {
-            globalDragState.hasMoved = true;
-        }
-
-        const deltaBottomPercent = (deltaY / window.innerHeight) * 100;
-        const deltaRightPercent = (deltaX / window.innerWidth) * 100;
-
-        container.style.bottom = (globalDragState.startBottom - deltaBottomPercent) + '%';
-        container.style.right = (globalDragState.startRight - deltaRightPercent) + '%';
-    };
-
-    const onMouseUp = () => {
-        setTimeout(() => { globalDragState.isDragging = false; globalDragState.hasMoved = false; }, 100);
-    };
-
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-
-    // Return cleanup function
-    return () => {
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-    };
-}
-
-// ===== UI 버튼 추가 =====
-let cleanupDrag: (() => void) | null = null;
-
-function addExportButton() {
-    // 기존 버튼이 있으면 유지
-    if (document.getElementById('the-export-btn')) return;
-
-    // 스타일 추가
-    if (!document.getElementById('the-float-style')) {
-        document.head.appendChild(style);
-    }
-
-    // 컨테이너 생성
-    const container = document.createElement('div');
-    container.className = 'the-float-container';
-    container.id = 'the-export-container';
-
-    // 버튼 생성
-    const btn = document.createElement('button');
-    btn.id = 'the-export-btn';
-    btn.className = 'the-export-btn';
-    btn.innerText = '📄 Export HTML(From Cache)';
-
-    btn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (globalDragState.hasMoved) return;
-
-        btn.classList.add('busy');
-        btn.innerText = '📄 Exporting...';
-        try {
+(async () => {
+    await Risuai.registerButton(
+        {
+            name: 'Export HTML (Cache)',
+            icon: '📄',
+            iconType: 'html',
+            location: 'chat'
+        },
+        async () => {
             await exportChatWithTranslation();
-        } finally {
-            btn.classList.remove('busy');
-            btn.innerText = '📄 Export HTML(From Cache)';
         }
-    }, { capture: true, passive: false });
+    );
 
-    container.appendChild(btn);
-    document.body.appendChild(container);
-
-    // 드래그 설정
-    cleanupDrag = setupDragHandlers(container);
-}
-
-function removeExportButton() {
-    const container = document.getElementById('the-export-container');
-    if (container) container.remove();
-
-    const styleEl = document.getElementById('the-float-style');
-    if (styleEl) styleEl.remove();
-
-    if (cleanupDrag) {
-        cleanupDrag();
-        cleanupDrag = null;
-    }
-}
-
-// ===== 플러그인 초기화 =====
-const ENABLED = getPluginEnabled();
-
-if (!ENABLED) {
-    console.log('[THE] Plugin disabled by setting');
-} else {
-    addExportButton();
-
-    // MutationObserver로 버튼 유지 (SPA 환경 대응)
-    const obs = new MutationObserver(() => {
-        if (!document.getElementById('the-export-btn')) {
-            addExportButton();
-        }
+    await Risuai.onUnload(async () => {
+        console.log('[HTMLExport] Unloading...');
     });
-    obs.observe(document.body, { childList: true, subtree: true });
 
-    // 정리
-    onUnload(() => {
-        obs.disconnect();
-        removeExportButton();
-    });
-}
-
-// 전역 접근용
-(window as any).translationExport = {
-    export: exportChatWithTranslation,
-    findTranslation,
-    extractLongestPlainChunk,
-    enable: () => { addExportButton(); },
-    disable: () => { removeExportButton(); }
-};
-
-console.log('Translation HTML Export plugin loaded!');
-console.log('Drag the button to reposition. Use translationExport.export() or click the button.');
+    console.log('[HTMLExport] Ready!');
+})();

@@ -8,6 +8,7 @@ import { getCharacterThemeMap, getDefaultTheme, loadThemePreset } from './storag
 
 let autoSwitchInterval: number | null = null;
 let lastCharacterName: string | null = null;
+let lastCharacterIndex: number = -1;
 
 const STORAGE_KEY_AUTO_SWITCH = 'autoSwitch';
 
@@ -47,12 +48,24 @@ export async function checkAndSwitchTheme(): Promise<void> {
         return;
     }
 
-    // Get current character
+    // Quick index check first (lightweight call) to skip unnecessary full character fetch
+    let currentIndex: number;
+    try {
+        currentIndex = await Risuai.getCurrentCharacterIndex();
+    } catch (e) {
+        return;
+    }
+
+    if (currentIndex === lastCharacterIndex) {
+        return;
+    }
+    lastCharacterIndex = currentIndex;
+
+    // Index changed - fetch full character for name-based mapping
     let char: any = null;
     try {
         char = await Risuai.getCharacter();
     } catch (e) {
-        // Character not available
         return;
     }
 
@@ -60,7 +73,7 @@ export async function checkAndSwitchTheme(): Promise<void> {
         return;
     }
 
-    // Only switch if character changed
+    // Only switch if character name actually changed (handles same-name edge case)
     if (char.name === lastCharacterName) {
         return;
     }
@@ -128,6 +141,7 @@ export function stopAutoSwitch(): void {
         clearInterval(autoSwitchInterval);
         autoSwitchInterval = null;
         lastCharacterName = null;
+        lastCharacterIndex = -1;
         console.log('Theme auto-switch disabled');
     }
 }
